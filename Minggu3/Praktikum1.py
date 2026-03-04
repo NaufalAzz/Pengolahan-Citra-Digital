@@ -15,7 +15,7 @@ print("Materi: Geometric Transformations, Homogeneous Coordinates, Interpolation
 # =============== FUNGSI BANTU ===============
 def create_test_image(size=256):
     """Create test image with geometric patterns"""
-    img = np.zeros((size, size), dtype=np.uint8)
+    img = np.zeros((size, size), dtype=np.uint8)a
     
     # Draw coordinate axes
     cv2.line(img, (size//2, 0), (size//2, size), 200, 1)
@@ -495,6 +495,64 @@ def demonstrate_image_registration():
     noise = np.random.normal(0, 10, moving_img.shape)
     moving_img = np.clip(moving_img.astype(float) + noise, 0, 255).astype(np.uint8)
     
-    # Try to estimate transformation
-    # In practice, use feature detection + matching
-    # Here we'll
+    # Feature detection and description using ORB
+    orb = cv2.ORB_create(nfeatures=500)
+
+    kp1, des1 = orb.detectAndCompute(ref_img, None)
+    kp2, des2 = orb.detectAndCompute(moving_img, None)
+
+    # Feature matching using Brute Force Matcher
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = bf.match(des1, des2)
+
+    # Sort matches by distance (best matches first)
+    matches = sorted(matches, key=lambda x: x.distance)
+
+    # Use top matches
+    num_matches = min(30, len(matches))
+    good_matches = matches[:num_matches]
+
+    # Extract matched keypoints
+    pts_ref = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+    pts_mov = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+
+    # Estimate affine transformation
+    M_estimated, inliers = cv2.estimateAffinePartial2D(
+        pts_mov, pts_ref, method=cv2.RANSAC
+    )
+
+    # Apply estimated transformation
+    if M_estimated is not None:
+        registered_img = cv2.warpAffine(moving_img, M_estimated, (256, 256))
+    else:
+        registered_img = moving_img.copy()
+
+    # Visualization
+    fig, axes = plt.subplots(1, 4, figsize=(18, 5))
+
+    axes[0].imshow(ref_img, cmap='gray')
+    axes[0].set_title('Reference Image')
+    axes[0].axis('off')
+
+    axes[1].imshow(moving_img, cmap='gray')
+    axes[1].set_title('Moving Image')
+    axes[1].axis('off')
+
+    axes[2].imshow(registered_img, cmap='gray')
+    axes[2].set_title('Registered Image')
+    axes[2].axis('off')
+
+    # Draw matches
+    match_img = cv2.drawMatches(
+        ref_img, kp1, moving_img, kp2,
+        good_matches, None, flags=2
+    )
+    axes[3].imshow(match_img, cmap='gray')
+    axes[3].set_title('Feature Matches (ORB)')
+    axes[3].axis('off')
+
+    plt.suptitle('Image Registration menggunakan Feature Matching', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.show()
+
+demonstrate_image_registration()
