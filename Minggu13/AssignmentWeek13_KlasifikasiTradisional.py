@@ -1,3 +1,4 @@
+import os
 import time
 import warnings
 import numpy as np
@@ -5,7 +6,9 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import seaborn as sns
 
-from sklearn.datasets import load_digits
+from PIL import Image
+from skimage.feature import hog
+
 from sklearn.model_selection import (
     train_test_split, cross_val_score,
     StratifiedKFold, learning_curve, GridSearchCV
@@ -20,41 +23,92 @@ from sklearn.metrics import (
     roc_curve, auc
 )
 from sklearn.multiclass import OneVsRestClassifier
-from skimage.feature import hog
 
 warnings.filterwarnings('ignore')
 
 COLORS_10 = plt.cm.tab10(np.linspace(0, 1, 10))
 SEP = "=" * 60
+DATASET_FOLDER = "mnist_dataset"
 
 
 def section(title):
     print(f"\n{SEP}\n  {title}\n{SEP}")
 
 
-# 1. LOAD DATASET & EKSTRAKSI FITUR
-def load_and_extract(n_samples=1000):
+# ------------------------------------------------
+# 1. LOAD DATASET DARI FOLDER PNG
+# ------------------------------------------------
+def load_and_extract():
     section("1. LOAD DATASET & EKSTRAKSI FITUR")
 
-    digits = load_digits()
-    rng = np.random.RandomState(42)
-    idx = rng.choice(len(digits.data), n_samples, replace=False)
-    X_raw = digits.data[idx]
-    X_img = digits.images[idx]
-    y = digits.target[idx]
+    if not os.path.exists(DATASET_FOLDER):
+        raise FileNotFoundError(
+            f"Folder '{DATASET_FOLDER}' tidak ditemukan.\n"
+            "Jalankan mnist_dataset.py terlebih dahulu."
+        )
 
-    print(f"Dataset : MNIST Digit (sklearn), {n_samples} sampel, 10 kelas")
-    print(f"Distribusi kelas: {np.bincount(y)}")
+    files = sorted(os.listdir(DATASET_FOLDER))
+    png_files = [f for f in files if f.endswith('.png')]
 
-    X_pixel = X_raw.copy()
+    print(f"Ditemukan {len(png_files)} file PNG di '{DATASET_FOLDER}/'")
 
+    images = []
+    labels = []
+
+    for fname in png_files:
+        # Nama: angka_<idx>_label_<digit>.png
+        label = int(fname.split('_label_')[1].replace('.png', ''))
+        img_path = os.path.join(DATASET_FOLDER, fname)
+        img = Image.open(img_path).convert('L')  # grayscale
+        img_arr = np.array(img, dtype=np.float32)
+        images.append(img_arr)
+        labels.append(label)
+
+    images = np.array(images)   # (N, 28, 28)
+    labels = np.array(labels)   # (N,)
+
+    print(f"Shape gambar : {images.shape}")
+    print(f"Jumlah kelas : {len(np.unique(labels))}")
+    print(f"Distribusi   : {np.bincount(labels)}")
+
+    # Visualisasi sampel + HOG
+    fig, axes = plt.subplots(2, 10, figsize=(16, 4))
+    for cls in range(10):
+        cidx = np.where(labels == cls)[0][0]
+        axes[0, cls].imshow(images[cidx], cmap='gray')
+        axes[0, cls].set_title(f"Digit {cls}", fontsize=8)
+        axes[0, cls].axis('off')
+        _, hog_img = hog(
+            images[cidx], orientations=9,
+            pixels_per_cell=(4, 4), cells_per_block=(2, 2),
+            feature_vector=True, visualize=True
+        )
+        axes[1, cls].imshow(hog_img, cmap='inferno')
+        axes[1, cls].set_title("HOG", fontsize=8)
+        axes[1, cls].axis('off')
+
+    plt.suptitle(
+        "Sample MNIST Digits (28x28) & HOG Visualization (per class)",
+        fontsize=12, fontweight='bold'
+    )
+    plt.tight_layout()
+    plt.show()
+
+    # Fitur 1: Raw Pixel (784 dim)
+    X_pixel = images.reshape(len(images), -1)
+
+    # Fitur 2: HOG (1296 dim)
     hog_features = []
-    for img in X_img:
-        feat = hog(img, orientations=8, pixels_per_cell=(2, 2),
-                   cells_per_block=(1, 1), feature_vector=True)
+    for img in images:
+        feat = hog(
+            img, orientations=9,
+            pixels_per_cell=(4, 4), cells_per_block=(2, 2),
+            feature_vector=True
+        )
         hog_features.append(feat)
     X_hog = np.array(hog_features)
 
+    # Gabungan
     X_combined = np.hstack([X_pixel, X_hog])
 
     print(f"\nDimensi fitur:")
@@ -62,33 +116,18 @@ def load_and_extract(n_samples=1000):
     print(f"  HOG         : {X_hog.shape[1]}")
     print(f"  Gabungan    : {X_combined.shape[1]}")
 
-    fig, axes = plt.subplots(2, 10, figsize=(16, 4))
-    for cls in range(10):
-        cidx = np.where(y == cls)[0][0]
-        axes[0, cls].imshow(X_img[cidx], cmap='gray')
-        axes[0, cls].set_title(f"Digit {cls}", fontsize=8)
-        axes[0, cls].axis('off')
-        _, hog_img = hog(X_img[cidx], orientations=8,
-                         pixels_per_cell=(2, 2), cells_per_block=(1, 1),
-                         feature_vector=True, visualize=True)
-        axes[1, cls].imshow(hog_img, cmap='inferno')
-        axes[1, cls].set_title("HOG", fontsize=8)
-        axes[1, cls].axis('off')
-
-    plt.suptitle("Sample Digits & HOG Visualization (per class)",
-                 fontsize=12, fontweight='bold')
-    plt.tight_layout()
-    plt.show()
-
-    return X_combined, y, X_img
+    return X_combined, labels, images
 
 
+# ------------------------------------------------
 # 2. SPLIT DATA & NORMALISASI
+# ------------------------------------------------
 def prepare_data(X, y):
     section("2. SPLIT DATA & NORMALISASI")
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.3, random_state=42, stratify=y)
 
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.3, random_state=42, stratify=y
+    )
     scaler = StandardScaler()
     X_train_s = scaler.fit_transform(X_train)
     X_test_s = scaler.transform(X_test)
@@ -98,7 +137,9 @@ def prepare_data(X, y):
     return X_train_s, X_test_s, y_train, y_test, scaler
 
 
+# ------------------------------------------------
 # 3. K-NEAREST NEIGHBORS
+# ------------------------------------------------
 def run_knn(X_train, X_test, y_train, y_test):
     section("3. K-NEAREST NEIGHBORS")
 
@@ -111,8 +152,9 @@ def run_knn(X_train, X_test, y_train, y_test):
         cv_means, test_accs = [], []
         for k in k_values:
             knn = KNeighborsClassifier(n_neighbors=k, metric=metric)
-            cv_s = cross_val_score(knn, X_train, y_train,
-                                   cv=cv, scoring='accuracy')
+            cv_s = cross_val_score(
+                knn, X_train, y_train, cv=cv, scoring='accuracy'
+            )
             cv_means.append(cv_s.mean())
             knn.fit(X_train, y_train)
             test_accs.append(knn.score(X_test, y_test))
@@ -136,13 +178,16 @@ def run_knn(X_train, X_test, y_train, y_test):
         for ki, cvi, tsi in zip(k_values, cv_data, te_data):
             gap = abs(cvi - tsi)
             col = 'red' if gap > 0.05 else 'green'
-            ax.annotate(f"D{gap:.2f}", (ki, min(cvi, tsi) - 0.02),
-                        ha='center', fontsize=7, color=col)
+            ax.annotate(
+                f"D{gap:.2f}", (ki, min(cvi, tsi) - 0.015),
+                ha='center', fontsize=7, color=col
+            )
 
     plt.suptitle(
         "KNN: Pengaruh k & Jarak terhadap Akurasi\n"
         "(D = |CV - Test|, merah > 0.05 = potensi overfit)",
-        fontsize=12, fontweight='bold')
+        fontsize=12, fontweight='bold'
+    )
     plt.tight_layout()
     plt.show()
 
@@ -152,9 +197,10 @@ def run_knn(X_train, X_test, y_train, y_test):
         'metric': dist_metrics,
         'weights': ['uniform', 'distance']
     }
-    grid_knn = GridSearchCV(KNeighborsClassifier(), param_grid_knn,
-                            cv=cv, scoring='accuracy',
-                            n_jobs=-1, verbose=0)
+    grid_knn = GridSearchCV(
+        KNeighborsClassifier(), param_grid_knn,
+        cv=cv, scoring='accuracy', n_jobs=-1, verbose=0
+    )
     t0 = time.time()
     grid_knn.fit(X_train, y_train)
     t_train = time.time() - t0
@@ -173,7 +219,9 @@ def run_knn(X_train, X_test, y_train, y_test):
     return best_knn, y_pred, met
 
 
+# ------------------------------------------------
 # 4. SUPPORT VECTOR MACHINE
+# ------------------------------------------------
 def run_svm(X_train, X_test, y_train, y_test):
     section("4. SUPPORT VECTOR MACHINE")
 
@@ -188,8 +236,9 @@ def run_svm(X_train, X_test, y_train, y_test):
         if kernel == 'rbf':
             params['gamma'] = 'scale'
         clf = svm.SVC(**params)
-        cv_s = cross_val_score(clf, X_train, y_train,
-                               cv=cv, scoring='accuracy')
+        cv_s = cross_val_score(
+            clf, X_train, y_train, cv=cv, scoring='accuracy'
+        )
         clf.fit(X_train, y_train)
         ta = clf.score(X_test, y_test)
         kernel_results[kernel] = {'cv': cv_s.mean(), 'test': ta}
@@ -199,8 +248,9 @@ def run_svm(X_train, X_test, y_train, y_test):
     c_accs = []
     for C in C_values:
         clf = svm.SVC(kernel='rbf', C=C, gamma='scale', random_state=42)
-        cv_s = cross_val_score(clf, X_train, y_train,
-                               cv=cv, scoring='accuracy')
+        cv_s = cross_val_score(
+            clf, X_train, y_train, cv=cv, scoring='accuracy'
+        )
         c_accs.append(cv_s.mean())
         print(f"  RBF C={C:5.1f}: CV={cv_s.mean():.4f}")
 
@@ -208,8 +258,9 @@ def run_svm(X_train, X_test, y_train, y_test):
     g_accs = []
     for g in gamma_values:
         clf = svm.SVC(kernel='rbf', C=1.0, gamma=g, random_state=42)
-        cv_s = cross_val_score(clf, X_train, y_train,
-                               cv=cv, scoring='accuracy')
+        cv_s = cross_val_score(
+            clf, X_train, y_train, cv=cv, scoring='accuracy'
+        )
         g_accs.append(cv_s.mean())
         print(f"  RBF gamma={g}: CV={cv_s.mean():.4f}")
 
@@ -265,9 +316,10 @@ def run_svm(X_train, X_test, y_train, y_test):
         'kernel': ['linear', 'rbf'],
         'gamma': ['scale', 0.01, 0.1]
     }
-    grid_svm = GridSearchCV(svm.SVC(random_state=42), param_grid_svm,
-                            cv=cv, scoring='accuracy',
-                            n_jobs=-1, verbose=0)
+    grid_svm = GridSearchCV(
+        svm.SVC(random_state=42), param_grid_svm,
+        cv=cv, scoring='accuracy', n_jobs=-1, verbose=0
+    )
     t0 = time.time()
     grid_svm.fit(X_train, y_train)
     t_train = time.time() - t0
@@ -286,22 +338,26 @@ def run_svm(X_train, X_test, y_train, y_test):
     return best_svm_model, y_pred, met
 
 
+# ------------------------------------------------
 # 5. METRICS HELPER
+# ------------------------------------------------
 def compute_metrics(y_test, y_pred, t_train, t_inf):
     return {
         'accuracy':  accuracy_score(y_test, y_pred),
-        'precision': precision_score(y_test, y_pred,
-                                     average='weighted', zero_division=0),
-        'recall':    recall_score(y_test, y_pred,
-                                  average='weighted', zero_division=0),
-        'f1':        f1_score(y_test, y_pred,
-                              average='weighted', zero_division=0),
+        'precision': precision_score(
+            y_test, y_pred, average='weighted', zero_division=0),
+        'recall':    recall_score(
+            y_test, y_pred, average='weighted', zero_division=0),
+        'f1':        f1_score(
+            y_test, y_pred, average='weighted', zero_division=0),
         't_train':   t_train,
         't_inf':     t_inf,
     }
 
 
+# ------------------------------------------------
 # 6. CONFUSION MATRIX
+# ------------------------------------------------
 def plot_confusion_matrices(y_test, y_pred_knn, y_pred_svm):
     section("5a. CONFUSION MATRIX")
 
@@ -322,7 +378,9 @@ def plot_confusion_matrices(y_test, y_pred_knn, y_pred_svm):
     plt.show()
 
 
+# ------------------------------------------------
 # 7. ROC CURVES
+# ------------------------------------------------
 def plot_roc(X_train, X_test, y_train, y_test, best_knn, best_svm):
     section("5b. ROC CURVES (One-vs-Rest)")
 
@@ -360,7 +418,8 @@ def plot_roc(X_train, X_test, y_train, y_test, best_knn, best_svm):
         ax.set_title(
             f"ROC One-vs-Rest - {title}\n"
             f"Mean AUC={np.mean(mean_aucs):.3f}",
-            fontweight='bold')
+            fontweight='bold'
+        )
         ax.legend(loc='lower right', fontsize=7, ncol=2)
         ax.grid(True, alpha=0.2)
 
@@ -370,7 +429,9 @@ def plot_roc(X_train, X_test, y_train, y_test, best_knn, best_svm):
     plt.show()
 
 
+# ------------------------------------------------
 # 8. DECISION BOUNDARY (PCA 2D)
+# ------------------------------------------------
 def plot_decision_boundary_pca(X_train, X_test, y_train, y_test,
                                 best_knn, best_svm):
     section("5c. DECISION BOUNDARY (PCA 2D)")
@@ -398,15 +459,16 @@ def plot_decision_boundary_pca(X_train, X_test, y_train, y_test,
         for cls in range(10):
             ax.scatter(X_tr2[y_train == cls, 0],
                        X_tr2[y_train == cls, 1],
-                       c=[COLORS_10[cls]], alpha=0.5, s=20, marker='o')
+                       c=[COLORS_10[cls]], alpha=0.4, s=15, marker='o')
             ax.scatter(X_te2[y_test == cls, 0],
                        X_te2[y_test == cls, 1],
-                       c=[COLORS_10[cls]], alpha=0.9, s=40, marker='*',
+                       c=[COLORS_10[cls]], alpha=0.9, s=35, marker='*',
                        edgecolors='black', linewidths=0.4,
                        label=f'D{cls}')
         ax.set_title(
             f"Decision Boundary - {title}\n(PCA 2D, * = test points)",
-            fontweight='bold')
+            fontweight='bold'
+        )
         ax.set_xlabel('PC1')
         ax.set_ylabel('PC2')
         ax.legend(loc='upper right', fontsize=7, ncol=2)
@@ -417,7 +479,21 @@ def plot_decision_boundary_pca(X_train, X_test, y_train, y_test,
     plt.show()
 
 
-# 9. LEARNING CURVES
+# ------------------------------------------------
+# 9. CLASSIFICATION REPORT
+# ------------------------------------------------
+def print_reports(y_test, y_pred_knn, y_pred_svm):
+    section("5d. CLASSIFICATION REPORT DETAIL")
+    names = [f"Digit {i}" for i in range(10)]
+    print("\n--- KNN ---")
+    print(classification_report(y_test, y_pred_knn, target_names=names))
+    print("\n--- SVM ---")
+    print(classification_report(y_test, y_pred_svm, target_names=names))
+
+
+# ------------------------------------------------
+# 10. LEARNING CURVES
+# ------------------------------------------------
 def plot_learning_curves(X_train, y_train, best_knn, best_svm):
     section("6. LEARNING CURVES")
 
@@ -433,8 +509,8 @@ def plot_learning_curves(X_train, y_train, best_knn, best_svm):
             model, X_train, y_train,
             cv=cv, scoring='accuracy',
             train_sizes=np.linspace(0.1, 1.0, 10),
-            n_jobs=-1)
-
+            n_jobs=-1
+        )
         tm, ts = tr_sc.mean(axis=1), tr_sc.std(axis=1)
         vm, vs = val_sc.mean(axis=1), val_sc.std(axis=1)
 
@@ -455,17 +531,9 @@ def plot_learning_curves(X_train, y_train, best_knn, best_svm):
     plt.show()
 
 
-# 10. CLASSIFICATION REPORT
-def print_reports(y_test, y_pred_knn, y_pred_svm):
-    section("5d. CLASSIFICATION REPORT DETAIL")
-    names = [f"Digit {i}" for i in range(10)]
-    print("\n--- KNN ---")
-    print(classification_report(y_test, y_pred_knn, target_names=names))
-    print("\n--- SVM ---")
-    print(classification_report(y_test, y_pred_svm, target_names=names))
-
-
+# ------------------------------------------------
 # 11. PERBANDINGAN KOMPREHENSIF
+# ------------------------------------------------
 def plot_comparison(metrics_knn, metrics_svm, y_test,
                     y_pred_knn, y_pred_svm):
     section("7. PERBANDINGAN KOMPREHENSIF KNN vs SVM")
@@ -487,7 +555,6 @@ def plot_comparison(metrics_knn, metrics_svm, y_test,
     fig = plt.figure(figsize=(18, 12))
     gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.4, wspace=0.4)
 
-    # Bar chart metrik
     ax0 = fig.add_subplot(gs[0, 0])
     x = np.arange(len(metric_names))
     w = 0.35
@@ -502,12 +569,13 @@ def plot_comparison(metrics_knn, metrics_svm, y_test,
     ax0.set_title("Metrik Evaluasi", fontweight='bold')
     ax0.legend()
     for bar in [*bars1, *bars2]:
-        ax0.text(bar.get_x() + bar.get_width() / 2,
-                 bar.get_height() + 0.01,
-                 f'{bar.get_height():.3f}',
-                 ha='center', fontsize=7)
+        ax0.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.01,
+            f'{bar.get_height():.3f}',
+            ha='center', fontsize=7
+        )
 
-    # Waktu training vs inference
     ax1 = fig.add_subplot(gs[0, 1])
     t_labels = ['Training', 'Inference']
     knn_times = [metrics_knn['t_train'], metrics_knn['t_inf']]
@@ -521,7 +589,6 @@ def plot_comparison(metrics_knn, metrics_svm, y_test,
     ax1.set_title("Waktu Training vs Inference", fontweight='bold')
     ax1.legend()
 
-    # F1 per kelas
     ax2 = fig.add_subplot(gs[0, 2])
     f1_knn = [f1_score(y_test, y_pred_knn, labels=[c],
                        average='macro', zero_division=0)
@@ -539,7 +606,6 @@ def plot_comparison(metrics_knn, metrics_svm, y_test,
     ax2.legend()
     ax2.grid(True, alpha=0.3)
 
-    # Radar chart
     ax3 = fig.add_subplot(gs[1, :2], polar=True)
     categories = ['Accuracy', 'Precision', 'Recall', 'F1']
     N = len(categories)
@@ -554,11 +620,9 @@ def plot_comparison(metrics_knn, metrics_svm, y_test,
     ax3.fill(angles, knn_r, alpha=0.15, color='steelblue')
     ax3.plot(angles, svm_r, 's-', color='coral', lw=2, label='SVM')
     ax3.fill(angles, svm_r, alpha=0.15, color='coral')
-    ax3.set_title("Radar Chart: KNN vs SVM",
-                  fontweight='bold', pad=20)
+    ax3.set_title("Radar Chart: KNN vs SVM", fontweight='bold', pad=20)
     ax3.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
 
-    # Ringkasan teks
     ax4 = fig.add_subplot(gs[1, 2])
     ax4.axis('off')
     best = "KNN" if metrics_knn['f1'] > metrics_svm['f1'] else "SVM"
@@ -589,12 +653,15 @@ def plot_comparison(metrics_knn, metrics_svm, y_test,
 
     plt.suptitle(
         "PERBANDINGAN KOMPREHENSIF: KNN vs SVM\n"
-        "Dataset MNIST Digit (1000 sampel)",
-        fontsize=14, fontweight='bold')
+        "Dataset MNIST Digit 28x28 (1000 sampel)",
+        fontsize=14, fontweight='bold'
+    )
     plt.show()
 
 
+# ------------------------------------------------
 # 12. ANALISIS & KESIMPULAN
+# ------------------------------------------------
 def final_analysis(metrics_knn, metrics_svm):
     section("8. ANALISIS & KESIMPULAN")
 
@@ -606,9 +673,10 @@ HASIL ANALISIS:
 ----------------------------------------------------------
 
 1. METODE TERBAIK:
+   Dilihat dari F1-score dan accuracy keseluruhan.
    SVM umumnya unggul pada data citra berdimensi tinggi
-   dengan fitur HOG. KNN kompetitif namun sensitif terhadap
-   noise karena berbasis jarak.
+   dengan fitur HOG. KNN kompetitif namun lebih lambat
+   saat inference karena berbasis pencarian jarak.
 
 2. PARAMETER OPTIMAL:
    KNN : k & metrik terbaik dikonfirmasi via GridSearchCV
@@ -630,7 +698,7 @@ HASIL ANALISIS:
    *  KNN training = hanya menyimpan data (lazy learner)
    ** KNN inference = hitung jarak ke semua data train
 
-4. FITUR TERBAIK:
+4. FITUR:
    Kombinasi HOG + Raw Pixel memberikan info komplementer:
    HOG   -> tepi/gradien (bentuk digit)
    Pixel -> informasi intensitas langsung
@@ -641,11 +709,6 @@ HASIL ANALISIS:
    - Butuh interpretabilitas   -> KNN (analisis tetangga)
    - Real-time inference       -> SVM (waktu konstan)
    - RAM terbatas              -> SVM (tidak simpan semua data)
-
-6. EKSTRAKSI FITUR:
-   HOG efektif untuk digit karena menangkap gradien yang
-   merepresentasikan bentuk angka. Kombinasi HOG + pixel
-   meningkatkan akurasi dibanding masing-masing secara mandiri.
 """)
 
     print(f"  PEMENANG AKURASI         : {best_f1}")
@@ -656,28 +719,32 @@ HASIL ANALISIS:
           f"  F1={metrics_svm['f1']:.4f}")
 
 
+# ------------------------------------------------
 # MAIN
+# ------------------------------------------------
 def main():
     print("\n" + "=" * 60)
     print("  KOMPARASI KNN vs SVM - PENGENALAN OBJEK CITRA")
-    print("  Dataset: MNIST Digit | Fitur: HOG + Pixel")
+    print("  Dataset: MNIST Digit 28x28 | Fitur: HOG + Pixel")
     print("=" * 60)
 
     np.random.seed(42)
 
-    X, y, X_img = load_and_extract(n_samples=1000)
+    X, y, X_img = load_and_extract()
     X_train, X_test, y_train, y_test, _ = prepare_data(X, y)
 
     best_knn, y_pred_knn, metrics_knn = run_knn(
-        X_train, X_test, y_train, y_test)
-
+        X_train, X_test, y_train, y_test
+    )
     best_svm, y_pred_svm, metrics_svm = run_svm(
-        X_train, X_test, y_train, y_test)
+        X_train, X_test, y_train, y_test
+    )
 
     plot_confusion_matrices(y_test, y_pred_knn, y_pred_svm)
     plot_roc(X_train, X_test, y_train, y_test, best_knn, best_svm)
-    plot_decision_boundary_pca(X_train, X_test, y_train, y_test,
-                                best_knn, best_svm)
+    plot_decision_boundary_pca(
+        X_train, X_test, y_train, y_test, best_knn, best_svm
+    )
     print_reports(y_test, y_pred_knn, y_pred_svm)
     plot_learning_curves(X_train, y_train, best_knn, best_svm)
     plot_comparison(metrics_knn, metrics_svm, y_test,
